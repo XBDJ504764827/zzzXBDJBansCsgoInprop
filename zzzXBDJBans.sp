@@ -17,15 +17,14 @@ public Plugin myinfo =
     url = "http://your-site.com"
 };
 
+// --- Configuration (Hardcoded) ---
+#define API_HOST "http://127.0.0.1:3000/api"
+#define API_USER "admin"
+#define API_PASS "123"
+
 // --- ConVars ---
-ConVar g_cvHost;
-ConVar g_cvUser;
-ConVar g_cvPass;
 ConVar g_cvServerName;
 
-char g_szHost[256];
-char g_szUser[64];
-char g_szPass[64];
 char g_szServerName[128];
 char g_szToken[2048]; // JWT Token can be long
 bool g_bAuthenticated = false;
@@ -36,18 +35,10 @@ Handle g_hRetryTimer = null;
 public void OnPluginStart()
 {
     // 初始化 ConVars
-    g_cvHost = CreateConVar("sm_xb_host", "http://localhost:3000/api", "Backend API URL (no trailing slash)");
-    g_cvUser = CreateConVar("sm_xb_user", "admin", "API Username for Bot");
-    g_cvPass = CreateConVar("sm_xb_pass", "123", "API Password for Bot");
     g_cvServerName = CreateConVar("sm_xb_server_name", "CSGO Server", "Server Name for Records");
-    
-    AutoExecConfig(true, "zzzXBDJBans");
     
     // 加载配置
     GetConVarValues();
-    HookConVarChange(g_cvHost, OnConVarChanged);
-    HookConVarChange(g_cvUser, OnConVarChanged);
-    HookConVarChange(g_cvPass, OnConVarChanged);
     HookConVarChange(g_cvServerName, OnConVarChanged);
 
     // 定时检查所有在线玩家 (每60秒)
@@ -60,21 +51,11 @@ public void OnPluginStart()
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
     GetConVarValues();
-    g_bAuthenticated = false;
-    DoLogin();
 }
 
 void GetConVarValues()
 {
-    g_cvHost.GetString(g_szHost, sizeof(g_szHost));
-    g_cvUser.GetString(g_szUser, sizeof(g_szUser));
-    g_cvPass.GetString(g_szPass, sizeof(g_szPass));
     g_cvServerName.GetString(g_szServerName, sizeof(g_szServerName));
-    
-    // Remove trailing slash if user added it
-    int len = strlen(g_szHost);
-    if (len > 0 && g_szHost[len-1] == '/')
-        g_szHost[len-1] = '\0';
 }
 
 // ----------------------------------------------------------------------------
@@ -85,18 +66,13 @@ void DoLogin()
     if (g_bAuthenticated) return;
 
     char url[512];
-    Format(url, sizeof(url), "%s/auth/login", g_szHost);
+    Format(url, sizeof(url), "%s/auth/login", API_HOST);
 
     Handle request = SteamWorks_CreateHTTPRequest(k_EHTTPMethodPOST, url);
     
-    JSONObject json = new JSONObject();
-    json.SetString("username", g_szUser);
-    json.SetString("password", g_szPass);
-    
     char body[512];
-    json.ToString(body, sizeof(body));
-    delete json;
-    
+    Format(body, sizeof(body), "{\"username\":\"%s\",\"password\":\"%s\"}", API_USER, API_PASS);
+
     SteamWorks_SetHTTPRequestRawPostBody(request, "application/json", body, strlen(body));
     SteamWorks_SetHTTPRequestContextValue(request, 0);
     SteamWorks_SetHTTPCallbacks(request, OnLoginComplete);
@@ -113,7 +89,7 @@ public int OnLoginComplete(Handle request, bool bFailure, bool bRequestSuccessfu
             g_hRetryTimer = CreateTimer(30.0, Timer_RetryLogin);
         
         delete request;
-        return;
+        return 0;
     }
 
     int bodySize;
@@ -164,6 +140,7 @@ public int OnLoginComplete(Handle request, bool bFailure, bool bRequestSuccessfu
     }
     
     delete request;
+    return 0;
 }
 
 public Action Timer_RetryLogin(Handle timer)
@@ -189,7 +166,7 @@ void CheckBan(int client)
     if (!g_bAuthenticated) return;
 
     char steamId[64];
-    if (!GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId))) return;
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
     
     char ip[64];
     GetClientIP(client, ip, sizeof(ip));
@@ -197,7 +174,7 @@ void CheckBan(int client)
     char url[512];
     // Encode params? Basic SteamID/IP shouldn't need heavy encoding but better safe.
     // Assuming simple format.
-    Format(url, sizeof(url), "%s/check_ban?steam_id=%s&ip=%s", g_szHost, steamId, ip);
+    Format(url, sizeof(url), "%s/check_ban?steam_id=%s&ip=%s", API_HOST, steamId, ip);
 
     Handle request = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
     SteamWorks_SetHTTPRequestHeaderValue(request, "Authorization", g_szToken);
@@ -255,6 +232,7 @@ public int OnCheckBanComplete(Handle request, bool bFailure, bool bRequestSucces
     // 404 means Not Banned, ignore.
 
     delete request;
+    return 0;
 }
 
 // Periodic Check
@@ -287,7 +265,7 @@ void UploadRecord(int client)
     GetClientName(client, name, sizeof(name));
     
     char steamId[64];
-    GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
+    GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId));
     
     char ip[64];
     GetClientIP(client, ip, sizeof(ip));
@@ -296,7 +274,7 @@ void UploadRecord(int client)
     // For simplicity sending convar.
     
     char url[512];
-    Format(url, sizeof(url), "%s/records", g_szHost);
+    Format(url, sizeof(url), "%s/records", API_HOST);
 
     Handle request = SteamWorks_CreateHTTPRequest(k_EHTTPMethodPOST, url);
     SteamWorks_SetHTTPRequestHeaderValue(request, "Authorization", g_szToken);
@@ -351,7 +329,7 @@ public Action OnBanClient(int client, int time, int flags, const char[] reason, 
     ReplaceString(targetName, sizeof(targetName), "\"", "\\\"");
 
     char targetSteam[64];
-    GetClientAuthId(client, AuthId_Steam2, targetSteam, sizeof(targetSteam));
+    GetClientAuthId(client, AuthId_SteamID64, targetSteam, sizeof(targetSteam));
     
     char targetIP[64];
     GetClientIP(client, targetIP, sizeof(targetIP));
@@ -395,7 +373,7 @@ public Action OnBanClient(int client, int time, int flags, const char[] reason, 
 void SendBanRequest(const char[] body)
 {
     char url[512];
-    Format(url, sizeof(url), "%s/bans", g_szHost);
+    Format(url, sizeof(url), "%s/bans", API_HOST);
     
     Handle request = SteamWorks_CreateHTTPRequest(k_EHTTPMethodPOST, url);
     SteamWorks_SetHTTPRequestHeaderValue(request, "Authorization", g_szToken);
@@ -415,4 +393,5 @@ public int OnBanRequestComplete(Handle request, bool bFailure, bool bRequestSucc
         LogError("[XBDJ] Ban upload failed. Status: %d", eStatusCode);
     }
     delete request;
+    return 0;
 }
