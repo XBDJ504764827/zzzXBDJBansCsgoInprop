@@ -10,7 +10,7 @@
 public Plugin myinfo = 
 {
     name = "zzzXBDJBans",
-    author = "Antigravity",
+    author = "wwq",
     description = "CS:GO Ban System Integration",
     version = PLUGIN_VERSION,
     url = ""
@@ -47,21 +47,30 @@ public void OnClientPostAdminCheck(int client)
         return;
 
     char steamId[32];
+    char steamIdOther[32];
     char ip[32];
     
     GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
     GetClientIP(client, ip, sizeof(ip));
     
+    // Generate the other universe variant (STEAM_0 vs STEAM_1)
+    strcopy(steamIdOther, sizeof(steamIdOther), steamId);
+    if (steamId[6] == '0') steamIdOther[6] = '1';
+    else if (steamId[6] == '1') steamIdOther[6] = '0';
+    
+    LogMessage("DEBUG: Checking ban for %N (Steam: %s / %s, IP: %s)", client, steamId, steamIdOther, ip);
+    
     // 1. Check Bans
-    char query[512];
+    // Check match against either universe variant
+    char query[1024];
     Format(query, sizeof(query), 
-        "SELECT id, reason, duration, expires_at FROM bans WHERE (steam_id = '%s' OR ip = '%s') AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1", 
-        steamId, ip);
+        "SELECT id, reason, duration, expires_at FROM bans WHERE (steam_id = '%s' OR steam_id = '%s' OR ip = '%s') AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1", 
+        steamId, steamIdOther, ip);
     
     g_hDatabase.Query(SQL_CheckBanCallback, query, GetClientUserId(client));
     
     // 2. Sync Admin
-    Format(query, sizeof(query), "SELECT role FROM admins WHERE steam_id = '%s'", steamId);
+    Format(query, sizeof(query), "SELECT role FROM admins WHERE steam_id = '%s' OR steam_id = '%s'", steamId, steamIdOther);
     g_hDatabase.Query(SQL_CheckAdminCallback, query, GetClientUserId(client));
 }
 
