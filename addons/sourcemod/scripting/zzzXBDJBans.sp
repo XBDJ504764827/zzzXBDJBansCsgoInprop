@@ -74,40 +74,6 @@ public void OnClientPostAdminCheck(int client)
     g_hDatabase.Query(SQL_CheckAdminCallback, query, GetClientUserId(client));
 }
 
-public void OnClientPutInServer(int client)
-{
-    if (IsFakeClient(client) || !g_hDatabase)
-        return;
-        
-    char name[MAX_NAME_LENGTH];
-    char steamId[32];
-    char ip[32];
-    char serverName[128] = "Unknown Server";
-    char serverIp[64];
-    
-    GetClientName(client, name, sizeof(name));
-    GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
-    GetClientIP(client, ip, sizeof(ip));
-    
-    // Escape name for SQL
-    char safeName[MAX_NAME_LENGTH * 2 + 1];
-    g_hDatabase.Format(safeName, sizeof(safeName), "%s", name);
-    
-    // Get server IP/port
-    int hostip = FindConVar("hostip").IntValue;
-    int hostport = FindConVar("hostport").IntValue;
-    Format(serverIp, sizeof(serverIp), "%d.%d.%d.%d:%d", 
-        (hostip >> 24) & 0xFF, (hostip >> 16) & 0xFF, (hostip >> 8) & 0xFF, hostip & 0xFF, 
-        hostport);
-
-    char query[1024];
-    Format(query, sizeof(query), 
-        "INSERT INTO player_records (player_name, steam_id, player_ip, server_name, server_address) VALUES ('%s', '%s', '%s', '%s', '%s')",
-        safeName, steamId, ip, serverName, serverIp);
-        
-    g_hDatabase.Query(SQL_LogCallback, query);
-}
-
 public void SQL_CheckBanCallback(Database db, DBResultSet results, const char[] error, any userid)
 {
     int client = GetClientOfUserId(userid);
@@ -169,13 +135,7 @@ public void SQL_CheckAdminCallback(Database db, DBResultSet results, const char[
     }
 }
 
-public void SQL_LogCallback(Database db, DBResultSet results, const char[] error, any data)
-{
-    if (results == null)
-    {
-        LogError("Logging query failed: %s", error);
-    }
-}
+
 
 public Action Timer_CheckBans(Handle timer)
 {
