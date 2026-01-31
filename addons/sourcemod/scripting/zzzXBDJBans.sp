@@ -5,13 +5,13 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "3.0.0"
 
 public Plugin myinfo = 
 {
     name = "zzzXBDJBans",
     author = "wwq",
-    description = "CS:GO Ban System Integration",
+    description = "CS:GO Ban System Integration (Queue Verification)",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -23,6 +23,7 @@ public void OnPluginStart()
 {
     g_cvServerId = CreateConVar("zzzxbdjbans_server_id", "1", "Server ID for this server instance");
     
+    LogMessage("zzzXBDJBans Plugin v%s Loaded. Starting database connection...", PLUGIN_VERSION);
     Database.Connect(OnDatabaseConnected, "zzzXBDJBans");
     
     // Check bans periodically
@@ -46,6 +47,101 @@ public void OnClientPostAdminCheck(int client)
     if (IsFakeClient(client) || !g_hDatabase)
         return;
 
+    // Start verification process: Insert request into DB
+    StartVerification(client);
+}
+
+void StartVerification(int client)
+{
+    char steamId[64];
+    // Use SteamID64 for backend compatibility
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
+    {
+        KickClient(client, "Verification Error: Invalid SteamID");
+        return;
+    }
+
+    LogMessage("Starting verification for %N (%s)", client, steamId);
+
+    // Insert 'pending' record.
+    char query[1024];
+    Format(query, sizeof(query), 
+        "INSERT INTO zzzXBDJBans.player_verifications (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending'", 
+        steamId);
+    
+    g_hDatabase.Query(SQL_StartVerificationCallback, query, GetClientUserId(client));
+}
+
+public void SQL_StartVerificationCallback(Database db, DBResultSet results, const char[] error, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client == 0) return;
+
+    if (results == null)
+    {
+        LogError("Failed to insert verification request: %s", error);
+        KickClient(client, "Verification Error: Database Error");
+        return;
+    }
+
+    // Start checking loop (Single Shot, will recurse if needed)
+    CreateTimer(1.0, Timer_PollVerification, userid);
+}
+
+public Action Timer_PollVerification(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client == 0 || !IsClientInGame(client))
+        return Plugin_Stop;
+
+    char steamId[64];
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
+        return Plugin_Stop;
+
+    char query[512];
+    Format(query, sizeof(query), "SELECT status, reason FROM zzzXBDJBans.player_verifications WHERE steam_id = '%s'", steamId);
+    g_hDatabase.Query(SQL_PollVerificationCallback, query, userid);
+
+    return Plugin_Stop;
+}
+
+public void SQL_PollVerificationCallback(Database db, DBResultSet results, const char[] error, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client == 0) return;
+
+    if (results == null || !results.FetchRow())
+    {
+        // Failed to read? Retry in 1s
+        CreateTimer(1.0, Timer_PollVerification, userid);
+        return;
+    }
+
+    char status[32];
+    char reason[256];
+    results.FetchString(0, status, sizeof(status));
+    results.FetchString(1, reason, sizeof(reason));
+
+    if (StrEqual(status, "pending"))
+    {
+        // Still pending? Check again in 1s
+        CreateTimer(1.0, Timer_PollVerification, userid);
+    }
+    else if (StrEqual(status, "allowed"))
+    {
+        LogMessage("Verification PASSED for %N. Reason: %s", client, reason);
+        CheckBansAndAdmin(client);
+    }
+    else // denied
+    {
+        KickClient(client, "Entry Denied: %s", reason);
+        LogMessage("Verification DENIED for %N. Reason: %s", client, reason);
+    }
+}
+
+// Common logic for checking Bans and Admins
+void CheckBansAndAdmin(int client)
+{
     char steamId[32];
     char steamIdOther[32];
     char ip[32];
@@ -53,15 +149,13 @@ public void OnClientPostAdminCheck(int client)
     GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
     GetClientIP(client, ip, sizeof(ip));
     
-    // Generate the other universe variant (STEAM_0 vs STEAM_1)
     strcopy(steamIdOther, sizeof(steamIdOther), steamId);
     if (steamId[6] == '0') steamIdOther[6] = '1';
     else if (steamId[6] == '1') steamIdOther[6] = '0';
     
-    LogMessage("DEBUG: Checking ban for %N (Steam: %s / %s, IP: %s)", client, steamId, steamIdOther, ip);
+    LogMessage("DEBUG: Checking ban/admin for %N (Steam: %s / %s, IP: %s)", client, steamId, steamIdOther, ip);
     
     // 1. Check Bans
-    // Check match against either universe variant
     char query[1024];
     Format(query, sizeof(query), 
         "SELECT id, reason, duration, expires_at FROM bans WHERE (steam_id = '%s' OR steam_id = '%s' OR ip = '%s') AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1", 
@@ -125,17 +219,10 @@ public void SQL_CheckAdminCallback(Database db, DBResultSet results, const char[
             admin.SetFlag(Admin_Ban, true);
         }
         
-        // Bind the admin to the client
-        // Note: RunAdminCacheChecks usually handles this for flatfiles/SQL-admins if configured via admins.cfg/sql
-        // Since we are doing custom sync, we manually apply flags or bind identity.
-        // Actually, SetUserAdmin works better here.
-        
         SetUserAdmin(client, admin, true);
         LogMessage("Granted admin privileges to %N (%s)", client, role);
     }
 }
-
-
 
 public Action Timer_CheckBans(Handle timer)
 {
@@ -145,7 +232,11 @@ public Action Timer_CheckBans(Handle timer)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
         {
-            OnClientPostAdminCheck(i); // Re-run check
+            // Note: We don't want to re-run the FULL delayed check in bans timer loop 
+            // because that would spam logs and be inefficient. 
+            // Just check bans/admins directly if needed? 
+            // For now, let's keep original logic but call the BAN check directly to avoid loop.
+            CheckBansAndAdmin(i);
         }
     }
     return Plugin_Continue;
