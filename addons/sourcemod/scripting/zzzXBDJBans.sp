@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.1.0"
+#define PLUGIN_VERSION "3.1.1"
 
 public Plugin myinfo = 
 {
@@ -102,7 +102,7 @@ void ContinueVerification(int client)
     // Insert 'pending' record.
     char query[1024];
     Format(query, sizeof(query), 
-        "INSERT INTO zzzXBDJBans.player_verifications (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending'", 
+        "INSERT INTO zzzXBDJBans.player_verifications (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending', reason=NULL, steam_level=NULL, playtime_minutes=NULL, updated_at=NOW()", 
         steamId);
     
     g_hDatabase.Query(SQL_StartVerificationCallback, query, GetClientUserId(client));
