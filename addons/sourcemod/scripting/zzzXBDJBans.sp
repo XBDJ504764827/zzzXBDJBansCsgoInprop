@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.0.0"
+#define PLUGIN_VERSION "3.1.0"
 
 public Plugin myinfo = 
 {
@@ -54,12 +54,48 @@ public void OnClientPostAdminCheck(int client)
 void StartVerification(int client)
 {
     char steamId[64];
-    // Use SteamID64 for backend compatibility
     if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
     {
         KickClient(client, "Verification Error: Invalid SteamID");
         return;
     }
+
+    // Check if verification is enabled for this server
+    char query[256];
+    Format(query, sizeof(query), "SELECT verification_enabled FROM servers WHERE id = %d", g_cvServerId.IntValue);
+    g_hDatabase.Query(SQL_CheckVerificationEnabledCallback, query, GetClientUserId(client));
+}
+
+public void SQL_CheckVerificationEnabledCallback(Database db, DBResultSet results, const char[] error, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client == 0) return;
+
+    bool enabled = true; // Default to true if error
+
+    if (results == null)
+    {
+        LogError("Failed to check verification setting: %s", error);
+    }
+    else if (results.FetchRow())
+    {
+        enabled = results.FetchInt(0) != 0;
+    }
+
+    if (!enabled)
+    {
+        LogMessage("Verification disabled for this server. Skipping verification for %N.", client);
+        CheckBansAndAdmin(client);
+        return;
+    }
+
+    ContinueVerification(client);
+}
+
+void ContinueVerification(int client)
+{
+    char steamId[64];
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
 
     LogMessage("Starting verification for %N (%s)", client, steamId);
 
