@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.1.1"
+#define PLUGIN_VERSION "3.1.2"
 
 public Plugin myinfo = 
 {
@@ -92,20 +92,54 @@ public void SQL_CheckVerificationEnabledCallback(Database db, DBResultSet result
     ContinueVerification(client);
 }
 
+int g_VerificationMode[MAXPLAYERS+1]; // 0=None, 1=Manual, 2=Cache
+
+public void OnClientDisconnect(int client)
+{
+    g_VerificationMode[client] = 0;
+}
+
 void ContinueVerification(int client)
 {
     char steamId[64];
     if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
 
-    LogMessage("Starting verification for %N (%s)", client, steamId);
+    LogMessage("Starting verification for %N (%s). Checking manual list...", client, steamId);
 
-    // Insert 'pending' record.
-    char query[1024];
-    Format(query, sizeof(query), 
-        "INSERT INTO zzzXBDJBans.player_verifications (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending', reason=NULL, steam_level=NULL, playtime_minutes=NULL, updated_at=NOW()", 
-        steamId);
-    
-    g_hDatabase.Query(SQL_StartVerificationCallback, query, GetClientUserId(client));
+    // 1. Check if user is in MANUAL list (player_verifications)
+    char query[256];
+    Format(query, sizeof(query), "SELECT status FROM zzzXBDJBans.player_verifications WHERE steam_id = '%s'", steamId);
+    g_hDatabase.Query(SQL_CheckManualListCallback, query, GetClientUserId(client));
+}
+
+public void SQL_CheckManualListCallback(Database db, DBResultSet results, const char[] error, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client == 0) return;
+
+    if (results != null && results.FetchRow())
+    {
+        // Found in manual list!
+        g_VerificationMode[client] = 1;
+        LogMessage("Player %N found in manual verification list. Polling manual status...", client);
+        CreateTimer(1.0, Timer_PollVerification, userid);
+    }
+    else
+    {
+        // Not in manual list. Use CACHE.
+        g_VerificationMode[client] = 2;
+        char steamId[64];
+        if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
+
+        LogMessage("Player %N not in manual list. Using Player Cache...", client);
+
+        char query[1024];
+        Format(query, sizeof(query), 
+            "INSERT INTO zzzXBDJBans.player_cache (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending', reason=NULL, steam_level=NULL, playtime_minutes=NULL, updated_at=NOW()", 
+            steamId);
+        
+        g_hDatabase.Query(SQL_StartVerificationCallback, query, GetClientUserId(client));
+    }
 }
 
 public void SQL_StartVerificationCallback(Database db, DBResultSet results, const char[] error, any userid)
@@ -115,7 +149,7 @@ public void SQL_StartVerificationCallback(Database db, DBResultSet results, cons
 
     if (results == null)
     {
-        LogError("Failed to insert verification request: %s", error);
+        LogError("Failed to insert verification request (Cache): %s", error);
         KickClient(client, "Verification Error: Database Error");
         return;
     }
@@ -134,8 +168,13 @@ public Action Timer_PollVerification(Handle timer, any userid)
     if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
         return Plugin_Stop;
 
+    char table[32];
+    if (g_VerificationMode[client] == 1) strcopy(table, sizeof(table), "player_verifications");
+    else if (g_VerificationMode[client] == 2) strcopy(table, sizeof(table), "player_cache");
+    else return Plugin_Stop; // Should not happen
+
     char query[512];
-    Format(query, sizeof(query), "SELECT status, reason FROM zzzXBDJBans.player_verifications WHERE steam_id = '%s'", steamId);
+    Format(query, sizeof(query), "SELECT status, reason FROM zzzXBDJBans.%s WHERE steam_id = '%s'", table, steamId);
     g_hDatabase.Query(SQL_PollVerificationCallback, query, userid);
 
     return Plugin_Stop;
@@ -165,13 +204,13 @@ public void SQL_PollVerificationCallback(Database db, DBResultSet results, const
     }
     else if (StrEqual(status, "allowed"))
     {
-        LogMessage("Verification PASSED for %N. Reason: %s", client, reason);
+        LogMessage("Verification PASSED for %N (%s). Reason: %s", client, (g_VerificationMode[client] == 1) ? "Manual": "Cache", reason);
         CheckBansAndAdmin(client);
     }
     else // denied
     {
         KickClient(client, "Entry Denied: %s", reason);
-        LogMessage("Verification DENIED for %N. Reason: %s", client, reason);
+        LogMessage("Verification DENIED for %N (%s). Reason: %s", client, (g_VerificationMode[client] == 1) ? "Manual": "Cache", reason);
     }
 }
 

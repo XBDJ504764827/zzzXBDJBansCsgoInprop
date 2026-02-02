@@ -15,6 +15,6 @@ else
 	do
 		smxfile="`echo $sourcefile | sed -e 's/\.sp$/\.smx/'`"
 		echo -e "\nCompiling $sourcefile ..."
-		./spcomp $sourcefile -ocompiled/$smxfile
+		./spcomp64 $sourcefile -ocompiled/$smxfile
 	done
 fi
