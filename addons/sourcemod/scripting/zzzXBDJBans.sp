@@ -5,19 +5,26 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.1.2"
+#define PLUGIN_VERSION "3.3.0"
+
+// 验证标准配置
+#define REQUIRED_RATING 3.0
+#define REQUIRED_LEVEL 1
 
 public Plugin myinfo = 
 {
     name = "zzzXBDJBans",
     author = "wwq",
-    description = "CS:GO Ban System Integration (Queue Verification)",
+    description = "CS:GO Ban System Integration (Local Verification)",
     version = PLUGIN_VERSION,
     url = ""
 };
 
 Database g_hDatabase = null;
 ConVar g_cvServerId;
+
+// 玩家验证模式: 0=None, 1=Manual, 2=Cache
+int g_VerificationMode[MAXPLAYERS+1];
 
 public void OnPluginStart()
 {
@@ -39,6 +46,7 @@ public void OnDatabaseConnected(Database db, const char[] error, any data)
     }
     
     g_hDatabase = db;
+    g_hDatabase.SetCharset("utf8mb4");
     LogMessage("Connected to zzzXBDJBans database successfully.");
 }
 
@@ -47,16 +55,24 @@ public void OnClientPostAdminCheck(int client)
     if (IsFakeClient(client) || !g_hDatabase)
         return;
 
-    // Start verification process: Insert request into DB
     StartVerification(client);
 }
+
+public void OnClientDisconnect(int client)
+{
+    g_VerificationMode[client] = 0;
+}
+
+// ============================================
+// 验证流程入口
+// ============================================
 
 void StartVerification(int client)
 {
     char steamId[64];
     if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
     {
-        KickClient(client, "Verification Error: Invalid SteamID");
+        KickClient(client, "验证错误：无效的SteamID");
         return;
     }
 
@@ -71,7 +87,7 @@ public void SQL_CheckVerificationEnabledCallback(Database db, DBResultSet result
     int client = GetClientOfUserId(userid);
     if (client == 0) return;
 
-    bool enabled = true; // Default to true if error
+    bool enabled = true;
 
     if (results == null)
     {
@@ -90,13 +106,6 @@ public void SQL_CheckVerificationEnabledCallback(Database db, DBResultSet result
     }
 
     ContinueVerification(client);
-}
-
-int g_VerificationMode[MAXPLAYERS+1]; // 0=None, 1=Manual, 2=Cache
-
-public void OnClientDisconnect(int client)
-{
-    g_VerificationMode[client] = 0;
 }
 
 void ContinueVerification(int client)
@@ -119,102 +128,299 @@ public void SQL_CheckManualListCallback(Database db, DBResultSet results, const 
 
     if (results != null && results.FetchRow())
     {
-        // Found in manual list!
+        // Found in manual list
         g_VerificationMode[client] = 1;
-        LogMessage("Player %N found in manual verification list. Polling manual status...", client);
-        CreateTimer(1.0, Timer_PollVerification, userid);
+        LogMessage("Player %N found in manual verification list.", client);
+        QueryCacheData(client, "player_verifications");
     }
     else
     {
-        // Not in manual list. Use CACHE.
+        // Not in manual list, use cache
         g_VerificationMode[client] = 2;
         char steamId[64];
         if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
 
-        LogMessage("Player %N not in manual list. Using Player Cache...", client);
-
-        char query[1024];
-        Format(query, sizeof(query), 
-            "INSERT INTO zzzXBDJBans.player_cache (steam_id, status) VALUES ('%s', 'pending') ON DUPLICATE KEY UPDATE status='pending', reason=NULL, steam_level=NULL, playtime_minutes=NULL, updated_at=NOW()", 
-            steamId);
-        
-        g_hDatabase.Query(SQL_StartVerificationCallback, query, GetClientUserId(client));
+        LogMessage("Player %N not in manual list. Checking Player Cache...", client);
+        QueryCacheData(client, "player_cache");
     }
 }
 
-public void SQL_StartVerificationCallback(Database db, DBResultSet results, const char[] error, any userid)
+// ============================================
+// 查询缓存数据
+// ============================================
+
+void QueryCacheData(int client, const char[] table)
+{
+    char steamId[64];
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
+
+    char query[512];
+    Format(query, sizeof(query), 
+        "SELECT status, steam_level, gokz_rating FROM zzzXBDJBans.%s WHERE steam_id = '%s'", 
+        table, steamId);
+    
+    // Pack table name with userid
+    DataPack pack = new DataPack();
+    pack.WriteCell(GetClientUserId(client));
+    pack.WriteString(table);
+    
+    g_hDatabase.Query(SQL_QueryCacheDataCallback, query, pack);
+}
+
+public void SQL_QueryCacheDataCallback(Database db, DBResultSet results, const char[] error, DataPack pack)
+{
+    pack.Reset();
+    int userid = pack.ReadCell();
+    char table[32];
+    pack.ReadString(table, sizeof(table));
+    delete pack;
+
+    int client = GetClientOfUserId(userid);
+    if (client == 0) return;
+
+    char steamId[64];
+    char playerName[128];
+    char ip[32];
+    
+    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId))) return;
+    GetClientName(client, playerName, sizeof(playerName));
+    GetClientIP(client, ip, sizeof(ip));
+
+    // 检查查询错误
+    if (results == null)
+    {
+        LogError("Cache query failed: %s", error);
+        KickClient(client, "验证错误：数据库查询失败");
+        return;
+    }
+
+    if (results.FetchRow())
+    {
+        char status[32];
+        results.FetchString(0, status, sizeof(status));
+        
+        // 获取 level (可能为 NULL)
+        int level = 0;
+        if (!results.IsFieldNull(1))
+        {
+            level = results.FetchInt(1);
+        }
+        
+        // 获取 rating (可能为 NULL)
+        float rating = 0.0;
+        if (!results.IsFieldNull(2))
+        {
+            char ratingStr[32];
+            results.FetchString(2, ratingStr, sizeof(ratingStr));
+            rating = StringToFloat(ratingStr);
+        }
+
+        LogMessage("Player %N cache status: %s, Level=%d, Rating=%.2f", client, status, level, rating);
+
+        if (StrEqual(status, "allowed"))
+        {
+            // Previously verified and allowed - direct pass
+            LogMessage("Player %N has ALLOWED status. Direct pass.", client);
+            CheckBansAndAdmin(client);
+            return;
+        }
+        else if (StrEqual(status, "verified"))
+        {
+            // Data available from backend, perform local verification
+            LogMessage("Player %N has valid data. Checking whitelist...", client);
+            CheckWhitelist(client, level, rating);
+            return;
+        }
+        else if (StrEqual(status, "pending"))
+        {
+            // Still pending, wait for backend
+            LogMessage("Player %N data still pending. Waiting 2s...", client);
+            CreateTimer(2.0, Timer_WaitForData, userid);
+            return;
+        }
+        else if (StrEqual(status, "denied"))
+        {
+            // Previously denied - re-verify (maybe player improved their rating/level)
+            LogMessage("Player %N was previously denied. Re-verifying...", client);
+        }
+        else
+        {
+            // Unknown status
+            LogMessage("Player %N has unknown status '%s'. Re-verifying...", client, status);
+        }
+    }
+    else
+    {
+        // No cache record exists, create one
+        LogMessage("Player %N not found in cache. Creating pending record...", client);
+    }
+    
+    char escapedName[256];
+    g_hDatabase.Escape(playerName, escapedName, sizeof(escapedName));
+    
+    char query[1024];
+    Format(query, sizeof(query), 
+        "INSERT INTO zzzXBDJBans.player_cache (steam_id, player_name, ip_address, status) VALUES ('%s', '%s', '%s', 'pending') ON DUPLICATE KEY UPDATE player_name='%s', ip_address='%s', status='pending', updated_at=NOW()", 
+        steamId, escapedName, ip, escapedName, ip);
+    
+    g_hDatabase.Query(SQL_InsertPendingCallback, query, GetClientUserId(client));
+}
+
+public void SQL_InsertPendingCallback(Database db, DBResultSet results, const char[] error, any userid)
 {
     int client = GetClientOfUserId(userid);
     if (client == 0) return;
 
     if (results == null)
     {
-        LogError("Failed to insert verification request (Cache): %s", error);
-        KickClient(client, "Verification Error: Database Error");
+        LogError("Failed to insert pending record: %s", error);
+        KickClient(client, "验证错误：数据库错误");
         return;
     }
 
-    // Start checking loop (Single Shot, will recurse if needed)
-    CreateTimer(1.0, Timer_PollVerification, userid);
+    // Wait for backend to fetch data
+    CreateTimer(1.0, Timer_WaitForData, userid);
 }
 
-public Action Timer_PollVerification(Handle timer, any userid)
+public Action Timer_WaitForData(Handle timer, any userid)
 {
     int client = GetClientOfUserId(userid);
     if (client == 0 || !IsClientInGame(client))
         return Plugin_Stop;
 
-    char steamId[64];
-    if (!GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId)))
-        return Plugin_Stop;
-
     char table[32];
-    if (g_VerificationMode[client] == 1) strcopy(table, sizeof(table), "player_verifications");
-    else if (g_VerificationMode[client] == 2) strcopy(table, sizeof(table), "player_cache");
-    else return Plugin_Stop; // Should not happen
+    if (g_VerificationMode[client] == 1) 
+        strcopy(table, sizeof(table), "player_verifications");
+    else 
+        strcopy(table, sizeof(table), "player_cache");
 
-    char query[512];
-    Format(query, sizeof(query), "SELECT status, reason FROM zzzXBDJBans.%s WHERE steam_id = '%s'", table, steamId);
-    g_hDatabase.Query(SQL_PollVerificationCallback, query, userid);
-
+    QueryCacheData(client, table);
     return Plugin_Stop;
 }
 
-public void SQL_PollVerificationCallback(Database db, DBResultSet results, const char[] error, any userid)
+// ============================================
+// 白名单检查
+// ============================================
+
+void CheckWhitelist(int client, int level, float rating)
 {
+    char steamId[64];
+    char steamId2[64];
+    
+    GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId));
+    GetClientAuthId(client, AuthId_Steam2, steamId2, sizeof(steamId2));
+    
+    // Pack data for callback
+    DataPack pack = new DataPack();
+    pack.WriteCell(GetClientUserId(client));
+    pack.WriteCell(level);
+    pack.WriteFloat(rating);
+    
+    char query[512];
+    Format(query, sizeof(query), 
+        "SELECT COUNT(*) FROM zzzXBDJBans.whitelist WHERE steam_id = '%s' OR steam_id = '%s'",
+        steamId, steamId2);
+    
+    g_hDatabase.Query(SQL_CheckWhitelistCallback, query, pack);
+}
+
+public void SQL_CheckWhitelistCallback(Database db, DBResultSet results, const char[] error, DataPack pack)
+{
+    pack.Reset();
+    int userid = pack.ReadCell();
+    int level = pack.ReadCell();
+    float rating = pack.ReadFloat();
+    delete pack;
+
     int client = GetClientOfUserId(userid);
     if (client == 0) return;
 
-    if (results == null || !results.FetchRow())
+    bool inWhitelist = false;
+    if (results != null && results.FetchRow())
     {
-        // Failed to read? Retry in 1s
-        CreateTimer(1.0, Timer_PollVerification, userid);
-        return;
+        inWhitelist = results.FetchInt(0) > 0;
     }
 
-    char status[32];
+    // Perform local verification
+    PerformLocalVerification(client, level, rating, inWhitelist);
+}
+
+// ============================================
+// 本地验证判断（核心逻辑）
+// ============================================
+
+void PerformLocalVerification(int client, int level, float rating, bool inWhitelist)
+{
+    char steamId[64];
+    GetClientAuthId(client, AuthId_SteamID64, steamId, sizeof(steamId));
+
+    // Check verification criteria
+    bool passed = false;
     char reason[256];
-    results.FetchString(0, status, sizeof(status));
-    results.FetchString(1, reason, sizeof(reason));
 
-    if (StrEqual(status, "pending"))
+    if (rating >= REQUIRED_RATING && level >= REQUIRED_LEVEL)
     {
-        // Still pending? Check again in 1s
-        CreateTimer(1.0, Timer_PollVerification, userid);
+        passed = true;
+        Format(reason, sizeof(reason), "验证通过：Rating %.2f / 等级 %d", rating, level);
     }
-    else if (StrEqual(status, "allowed"))
+    else if (inWhitelist)
     {
-        LogMessage("Verification PASSED for %N (%s). Reason: %s", client, (g_VerificationMode[client] == 1) ? "Manual": "Cache", reason);
+        passed = true;
+        Format(reason, sizeof(reason), "白名单通过");
+    }
+    else
+    {
+        Format(reason, sizeof(reason), "验证失败：Rating %.2f(需>=%.1f) / 等级 %d(需>=%d)，不在白名单中", 
+            rating, REQUIRED_RATING, level, REQUIRED_LEVEL);
+    }
+
+    if (passed)
+    {
+        LogMessage("Verification PASSED for %N: %s", client, reason);
+        
+        // Update cache status to allowed
+        UpdateCacheStatus(steamId, "allowed", reason);
+        
+        // Continue to check bans and admin
         CheckBansAndAdmin(client);
     }
-    else // denied
+    else
     {
-        KickClient(client, "Entry Denied: %s", reason);
-        LogMessage("Verification DENIED for %N (%s). Reason: %s", client, (g_VerificationMode[client] == 1) ? "Manual": "Cache", reason);
+        LogMessage("Verification DENIED for %N: %s", client, reason);
+        
+        // Update cache status to denied
+        UpdateCacheStatus(steamId, "denied", reason);
+        
+        // Kick with Chinese message
+        KickClient(client, "%s", reason);
     }
 }
 
-// Common logic for checking Bans and Admins
+void UpdateCacheStatus(const char[] steamId, const char[] status, const char[] reason)
+{
+    char escapedReason[512];
+    g_hDatabase.Escape(reason, escapedReason, sizeof(escapedReason));
+    
+    char query[1024];
+    Format(query, sizeof(query), 
+        "UPDATE zzzXBDJBans.player_cache SET status = '%s', reason = '%s', updated_at = NOW() WHERE steam_id = '%s'",
+        status, escapedReason, steamId);
+    
+    g_hDatabase.Query(SQL_UpdateStatusCallback, query);
+}
+
+public void SQL_UpdateStatusCallback(Database db, DBResultSet results, const char[] error, any data)
+{
+    if (results == null)
+    {
+        LogError("Failed to update cache status: %s", error);
+    }
+}
+
+// ============================================
+// 封禁和管理员检查
+// ============================================
+
 void CheckBansAndAdmin(int client)
 {
     char steamId[32];
@@ -261,7 +467,7 @@ public void SQL_CheckBanCallback(Database db, DBResultSet results, const char[] 
         results.FetchString(1, reason, sizeof(reason));
         results.FetchString(2, duration, sizeof(duration));
         
-        KickClient(client, "You are banned. Reason: %s (Duration: %s)", reason, duration);
+        KickClient(client, "您已被封禁。原因：%s（时长：%s）", reason, duration);
         LogMessage("Kicked banned player: %N (%s)", client, reason);
     }
 }
@@ -299,6 +505,10 @@ public void SQL_CheckAdminCallback(Database db, DBResultSet results, const char[
     }
 }
 
+// ============================================
+// 定时检查封禁
+// ============================================
+
 public Action Timer_CheckBans(Handle timer)
 {
     if (!g_hDatabase) return Plugin_Continue;
@@ -307,10 +517,6 @@ public Action Timer_CheckBans(Handle timer)
     {
         if (IsClientInGame(i) && !IsFakeClient(i))
         {
-            // Note: We don't want to re-run the FULL delayed check in bans timer loop 
-            // because that would spam logs and be inefficient. 
-            // Just check bans/admins directly if needed? 
-            // For now, let's keep original logic but call the BAN check directly to avoid loop.
             CheckBansAndAdmin(i);
         }
     }
