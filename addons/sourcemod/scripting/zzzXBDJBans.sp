@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.4.0"
+#define PLUGIN_VERSION "3.4.1"
 
 // 验证标准配置
 #define REQUIRED_RATING 3.0
@@ -114,7 +114,7 @@ void CheckWhitelist(int client)
     
     char query[512];
     Format(query, sizeof(query), 
-        "SELECT COUNT(*) FROM zzzXBDJBans.whitelist WHERE steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s'",
+        "SELECT status FROM zzzXBDJBans.whitelist WHERE steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s'",
         steamId, steamId, steamId2);
     
     g_hDatabase.Query(SQL_CheckWhitelistCallback, query, GetClientUserId(client));
@@ -132,13 +132,29 @@ public void SQL_CheckWhitelistCallback(Database db, DBResultSet results, const c
         return;
     }
 
-    if (results.FetchRow() && results.FetchInt(0) > 0)
+    if (results.FetchRow())
     {
-        // 在白名单中，直接放行
-        LogMessage("Player %N is in WHITELIST. Direct pass.", client);
-        CheckBansAndAdmin(client);
-        return;
+        char status[32];
+        results.FetchString(0, status, sizeof(status));
+
+        if (StrEqual(status, "rejected"))
+        {
+            KickClient(client, "您已被拒绝访问本服务器");
+            LogMessage("Player %N blocked (whitelist rejected).", client);
+            return;
+        }
+
+        if (StrEqual(status, "approved"))
+        {
+            // 在白名单中，直接放行
+            LogMessage("Player %N is in WHITELIST. Direct pass.", client);
+            CheckBansAndAdmin(client);
+            return;
+        }
+        
+        // pending 状态，继续往下走，看是否满足自动验证
     }
+
 
     // 不在白名单，进入 Step 2: 检查缓存
     LogMessage("Player %N not in whitelist. Checking cache...", client);
