@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.4.2"
+#define PLUGIN_VERSION "3.4.3"
 
 // 验证标准配置
 #define REQUIRED_RATING 3.0
@@ -414,9 +414,9 @@ void CheckBansAndAdmin(int client)
     
     g_hDatabase.Query(SQL_CheckBanCallback, query, GetClientUserId(client));
     
-    // 2. Sync Admin (使用 steam_id_64 匹配)
-    Format(query, sizeof(query), "SELECT role FROM admins WHERE steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s'", steamId64, steamId, steamIdOther);
-    g_hDatabase.Query(SQL_CheckAdminCallback, query, GetClientUserId(client));
+    // 2. Sync Admin (Disabled per requirement: Web admins do not get in-game privileges)
+    // Format(query, sizeof(query), "SELECT role FROM admins WHERE steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s'", steamId64, steamId, steamIdOther);
+    // g_hDatabase.Query(SQL_CheckAdminCallback, query, GetClientUserId(client));
 }
 
 public void SQL_CheckBanCallback(Database db, DBResultSet results, const char[] error, any userid)
