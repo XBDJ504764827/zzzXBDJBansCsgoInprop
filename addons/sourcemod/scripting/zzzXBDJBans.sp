@@ -399,14 +399,17 @@ void CheckBansAndAdmin(int client)
     GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
     GetClientIP(client, ip, sizeof(ip));
     
+    LogMessage("Checking bans for %N (SteamID: %s, IP: %s)", client, steamId64, ip);
+
     strcopy(steamIdOther, sizeof(steamIdOther), steamId);
     if (steamId[6] == '0') steamIdOther[6] = '1';
     else if (steamId[6] == '1') steamIdOther[6] = '0';
     
-    // 1. Check Bans (优先使用 steam_id_64 匹配)
+    // 1. Check Bans
+    // Fetch ban_type (5) and steam_id_64 (6) from DB
     char query[1024];
     Format(query, sizeof(query), 
-        "SELECT id, reason, duration, expires_at FROM bans WHERE (steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s' OR ip = '%s') AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1", 
+        "SELECT id, reason, duration, expires_at, ip, ban_type, steam_id_64 FROM bans WHERE (steam_id_64 = '%s' OR steam_id = '%s' OR steam_id = '%s' OR ip = '%s') AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC LIMIT 1", 
         steamId64, steamId, steamIdOther, ip);
     
     g_hDatabase.Query(SQL_CheckBanCallback, query, GetClientUserId(client));
@@ -429,13 +432,70 @@ public void SQL_CheckBanCallback(Database db, DBResultSet results, const char[] 
     
     if (results.FetchRow())
     {
+        int banId = results.FetchInt(0);
         char reason[128];
         char duration[32];
+        char storedIp[32];
+        char banType[32];
+        char bannedSteamId64[64];
+        
         results.FetchString(1, reason, sizeof(reason));
         results.FetchString(2, duration, sizeof(duration));
+        results.FetchString(4, storedIp, sizeof(storedIp));
+        results.FetchString(5, banType, sizeof(banType));
+        results.FetchString(6, bannedSteamId64, sizeof(bannedSteamId64));
         
-        KickClient(client, "您已被封禁。原因：%s（时长：%s）", reason, duration);
-        LogMessage("Kicked banned player: %N (%s)", client, reason);
+        char clientSteamId64[64];
+        char clientIp[32];
+        GetClientAuthId(client, AuthId_SteamID64, clientSteamId64, sizeof(clientSteamId64));
+        GetClientIP(client, clientIp, sizeof(clientIp));
+
+        // 判断是否是本人 (SteamID 匹配)
+        bool isSameAccount = StrEqual(clientSteamId64, bannedSteamId64);
+
+        if (isSameAccount)
+        {
+            // Case A: 同账号匹配 (Direct Ban)
+            // 如果数据库中没有 IP 记录，更新为当前玩家 IP
+            if (storedIp[0] == '\0')
+            {
+                char updateQuery[256];
+                Format(updateQuery, sizeof(updateQuery), "UPDATE bans SET ip = '%s' WHERE id = %d", clientIp, banId);
+                g_hDatabase.Query(SQL_GenericCallback, updateQuery);
+                LogMessage("Updated missing IP for banned player %N (BanID: %d, IP: %s)", client, banId, clientIp);
+            }
+            // 踢出
+            KickClient(client, "您已被封禁。原因：%s（时长：%s）", reason, duration);
+            LogMessage("Kicked banned player: %N (Account Match, BanID: %d)", client, banId);
+        }
+        else
+        {
+            // Case B: 异账号匹配 (IP Match)
+            if (StrEqual(banType, "ip"))
+            {
+                // 是 IP 封禁 -> 连坐
+                LogMessage("IP Ban Match for %N! (Linked to BanID: %d, IP: %s)", client, banId, clientIp);
+
+                // 为当前马甲号创建新封禁
+                char newReason[256];
+                Format(newReason, sizeof(newReason), "同IP关联封禁 (Linked to %s)", bannedSteamId64);
+                
+                char insertQuery[1024];
+                Format(insertQuery, sizeof(insertQuery), 
+                    "INSERT INTO bans (name, steam_id, steam_id_64, ip, ban_type, reason, duration, admin_name, expires_at, created_at, status, server_id) SELECT '%N', 'PENDING', '%s', '%s', 'account', '%s', duration, 'System (IP Linked)', expires_at, NOW(), 'active', server_id FROM bans WHERE id = %d",
+                    client, clientSteamId64, clientIp, newReason, banId);
+                
+                g_hDatabase.Query(SQL_GenericCallback, insertQuery);
+
+                KickClient(client, "检测到关联封禁 IP。在此 IP 上的所有账号均被禁止进入。");
+            }
+            else
+            {
+                // 不是 IP 封禁 -> 放行
+                LogMessage("Player %N shares IP with banned player (BanID: %d) but BanType is '%s'. ALLOWING access.", client, banId, banType);
+                // 不执行 KickClient，直接返回
+            }
+        }
     }
 }
 
