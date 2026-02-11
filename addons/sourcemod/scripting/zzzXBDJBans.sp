@@ -5,7 +5,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "3.4.1"
+#define PLUGIN_VERSION "3.4.2"
 
 // 验证标准配置
 #define REQUIRED_RATING 3.0
